@@ -1,4 +1,5 @@
 pub mod cache;
+pub mod log_parser;
 
 use crate::cache::Cache;
 
@@ -17,5 +18,10 @@ fn main() {
         let hit_l2 = l2.access(addr);
 
         println!("Access 0x{:x}:  L2 hit: {}", addr, hit_l2);
+    }
+
+    let parser = log_parser::LogParser::new("logs/firefox/exec.log.0").unwrap();
+    for record in parser.take(5) {
+        println!("{:?}", record);
     }
 }
