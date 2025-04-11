@@ -24,5 +24,9 @@ fn main() {
 
     let parser = log_parser::LogParser::new("logs/firefox/merged.log").unwrap();
 
-    row_clone::add_rowclone_info(parser, "logs/firefox/kernel.log");
+    row_clone::add_rowclone_info(
+        parser,
+        "logs/firefox/kernel.log",
+        "logs/firefox/rowclone.log",
+    );
 }
