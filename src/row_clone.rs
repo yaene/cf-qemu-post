@@ -10,6 +10,8 @@ const COPY_WINDOW: usize = 25;
 const COPY_WINDOW_STALE_THRESHOLD: usize = 5; // if 5 newer logs have been matched expect no more matches
 // for this one
 const COPY_CONFIDENCE_THRESHOLD: usize = 64; // how many bytes worth of matching of loads AND stores we should see 
+// TODO: [yb] make confidence threshold dependent on
+// transfer size
 const COPY_CONFIDENCE_WINDOW: usize = 50; // in the next COPY_CONFIDENCE_WINDOW accesses
 
 // need ongoing copy operations.
@@ -96,6 +98,7 @@ fn page_number(address: u64) -> u64 {
 }
 
 fn mem_copy_match(mem_access: &log_parser::LogRecord, copy: &MemCpy) -> bool {
+    // TODO: [yb] make this somewhat fuzzy in case a mem access is missed occasionally..
     (copy.current_from == mem_access.address && mem_access.store == 0)
         || (copy.current_to == mem_access.address && mem_access.store == 1)
 }
@@ -301,10 +304,9 @@ fn match_copy_to_mem_accesses(
         } else if let Some(i) = is_copy_start(&mem_access, &copy_window, &mut mem_accesses) {
             eprintln!("New copy!");
             push_ongoing_copy(&mut ongoing_copies, &copy_window[i], &mem_access, output);
+            copy_window.remove(i);
             if let Some(line) = next_kernel_line(&mut copy_logs) {
-                copy_window[i] = line;
-            } else {
-                copy_window.remove(i);
+                copy_window.push(line);
             }
             remove_stale_copies(copy_window, &mut copy_logs);
         } else {
