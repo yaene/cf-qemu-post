@@ -20,6 +20,7 @@ impl CacheSet {
         }
     }
 
+    // TODO: [yb] handle rowclone (invalidation) in cache
     /// Returns true if tag hit; false if miss.
     pub fn access(&mut self, tag: u64) -> bool {
         if let Some(pos) = self.lines.iter().position(|&line| line == Some(tag)) {

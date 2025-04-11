@@ -226,6 +226,7 @@ fn is_copy_start(
 }
 
 fn next_kernel_line(lines: &mut impl Iterator<Item = io::Result<String>>) -> Option<KernelRecord> {
+    // TODO: [yb] filter non-rowclonable (not same subarray)
     if let Some(Ok(line)) = lines.next() {
         if let Some(record) = parse_kernel_line(&line) {
             return Some(record);
