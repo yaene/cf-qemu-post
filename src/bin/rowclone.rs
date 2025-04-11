@@ -1,5 +1,5 @@
-use crate::log_parser;
-use crate::lookahead_iter::LookaheadIterator;
+use cf_qemu_post::log_parser;
+use cf_qemu_post::lookahead_iter::LookaheadIterator;
 use once_cell::sync::Lazy;
 use regex::Regex;
 use std::fmt;
@@ -298,12 +298,13 @@ fn match_copy_to_mem_accesses(
 ) {
     let mut ongoing_copies: Vec<MemCpy> = vec![];
     let mut mem_accesses = LookaheadIterator::new(mem_parser);
+    let mut rowclones = 0;
 
     while let Some(Ok(mem_access)) = mem_accesses.next() {
         if let Some(copy_idx) = is_part_of_copy(&mem_access, &ongoing_copies) {
             update_copy(&mut ongoing_copies, copy_idx, &mem_access);
         } else if let Some(i) = is_copy_start(&mem_access, &copy_window, &mut mem_accesses) {
-            eprintln!("New copy!");
+            rowclones += 1;
             push_ongoing_copy(&mut ongoing_copies, &copy_window[i], &mem_access, output);
             copy_window.remove(i);
             if let Some(line) = next_kernel_line(&mut copy_logs) {
@@ -315,6 +316,7 @@ fn match_copy_to_mem_accesses(
         }
     }
 
+    eprintln!("Rowclones matched: {}", rowclones);
     eprintln!("Unfinished copies: {}", ongoing_copies.len());
 }
 
@@ -338,8 +340,23 @@ pub fn add_rowclone_info(
 
     match_copy_to_mem_accesses(parser, lines, &mut copy_window, &mut writer);
 
-    eprintln!("Unmatched copies: {}", copy_window.len());
+    eprintln!("Unmatched Rowclones: {}", copy_window.len());
 
-    writer.flush();
+    let _ = writer.flush();
     Ok(())
+}
+
+fn main() {
+    let parser = log_parser::LogParser::new("logs/firefox/merged.log").unwrap();
+    if add_rowclone_info(
+        parser,
+        "logs/firefox/kernel.log",
+        "logs/firefox/rowclone.log",
+    )
+    .is_ok()
+    {
+        eprintln!("Finished adding rowclone info");
+    } else {
+        eprintln!("Error adding rowclone info");
+    }
 }
