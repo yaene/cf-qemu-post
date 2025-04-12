@@ -4,7 +4,8 @@ use std::{
     fs::File,
     io::{BufWriter, Write},
 };
-mod log_parser;
+
+use cf_qemu_post::log_parser;
 
 const CPUS: usize = 8;
 
@@ -22,7 +23,7 @@ fn main() {
     let mut parsers: Vec<log_parser::LogParser> = Vec::new();
     for c in 0..CPUS {
         parsers.push(
-            log_parser::LogParser::new(format!("logs/firefox/exec.log.{c}").as_str())
+            log_parser::LogParser::new(format!("logs/firefox/log.txt.{c}").as_str())
                 .expect("Failed to open log file"),
         );
     }
@@ -31,12 +32,20 @@ fn main() {
 
     let mut writer = BufWriter::new(output_file);
     let mut output_buf = [0u8; log_parser::LogRecord::SIZE];
+    let mut prev_insn_count = 0;
 
     let mut heap: BinaryHeap<Reverse<(log_parser::LogRecord, usize)>> = BinaryHeap::new();
     for (i, parser) in parsers.iter_mut().enumerate() {
         push_next_record(&mut heap, parser, i);
     }
-    while let Some(Reverse((record, i))) = heap.pop() {
+    while let Some(Reverse((mut record, i))) = heap.pop() {
+        let mut bubble_count = record.insn_count - prev_insn_count;
+        if prev_insn_count > record.insn_count {
+            eprintln!("Warning: instruction count out of order!");
+            bubble_count = 0;
+        }
+        record.insn_count = bubble_count;
+        prev_insn_count = record.insn_count;
         record.serialize(&mut output_buf);
         writer
             .write_all(&output_buf)
