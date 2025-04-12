@@ -7,13 +7,14 @@ typedef struct LogRecord {
   uint64_t insn_count;
   char cpu;
   char store;
+  char access_size;
   uint64_t address;
 } LogRecord;
 
 int main() {
 
   LogRecord buf[BUF_SIZE];
-  FILE *file = fopen("logs/firefox/merged.log", "r");
+  FILE *file = fopen("logs/firefox/log.txt.0", "r");
 
   int found = 0;
   uint64_t insn = 0;

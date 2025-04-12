@@ -1,5 +1,6 @@
 use cf_qemu_post::log_parser;
 use cf_qemu_post::lookahead_iter::LookaheadIterator;
+use cf_qemu_post::memory_access::{MemRecord, MemoryAccess, RowcloneRecord};
 use once_cell::sync::Lazy;
 use regex::Regex;
 use std::fmt;
@@ -246,27 +247,27 @@ fn push_ongoing_copy(
     if let Some(copy) = new_ongoing_copy(copy, mem_access) {
         writeln!(
             output,
-            "{},rowclone,0x{:016x},0x{:016x}",
-            mem_access.insn_count, copy.from, copy.to
+            "{}",
+            RowcloneRecord {
+                insn_count: mem_access.insn_count,
+                from: copy.from,
+                to: copy.to,
+            }
         );
         ongoing_copies.push(copy);
     }
 }
 
 fn print_regular_access(mem_access: &log_parser::LogRecord, output: &mut BufWriter<File>) {
-    if mem_access.store == 1 {
-        writeln!(
-            output,
-            "{},-1,0x{:016x}",
-            mem_access.insn_count, mem_access.address
-        );
-    } else {
-        writeln!(
-            output,
-            "{},0x{:016x}",
-            mem_access.insn_count, mem_access.address
-        );
-    }
+    writeln!(
+        output,
+        "{}",
+        MemRecord {
+            insn_count: mem_access.insn_count,
+            address: mem_access.address,
+            store: mem_access.store == 1,
+        }
+    );
 }
 
 fn update_stale(copy_window: &mut Vec<KernelRecord>) {
