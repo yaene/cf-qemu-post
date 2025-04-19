@@ -22,9 +22,10 @@ fn push_next_record(
 fn main() {
     let mut parsers: Vec<log_parser::LogParser> = Vec::new();
     for c in 0..CPUS {
+        let filename = format!("logs/firefox/log.txt.{c}");
         parsers.push(
-            log_parser::LogParser::new(format!("logs/firefox/log.txt.{c}").as_str())
-                .expect("Failed to open log file"),
+            log_parser::LogParser::new(&filename)
+                .expect(format!("Failed to open log file {filename}").as_str()),
         );
     }
 
@@ -38,13 +39,10 @@ fn main() {
     for (i, parser) in parsers.iter_mut().enumerate() {
         push_next_record(&mut heap, parser, i);
     }
-    while let Some(Reverse((mut record, i))) = heap.pop() {
-        let mut bubble_count = record.insn_count - prev_insn_count;
+    while let Some(Reverse((record, i))) = heap.pop() {
         if prev_insn_count > record.insn_count {
             eprintln!("Warning: instruction count out of order!");
-            bubble_count = 0;
         }
-        record.insn_count = bubble_count;
         prev_insn_count = record.insn_count;
         record.serialize(&mut output_buf);
         writer

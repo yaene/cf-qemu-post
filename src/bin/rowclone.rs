@@ -1,19 +1,25 @@
 use cf_qemu_post::log_parser;
 use cf_qemu_post::lookahead_iter::LookaheadIterator;
-use cf_qemu_post::memory_access::{MemRecord, MemoryAccess, RowcloneRecord};
+use cf_qemu_post::memory_access::{MemRecord, RowcloneRecord};
 use once_cell::sync::Lazy;
 use regex::Regex;
+use std::collections::HashMap;
 use std::fmt;
 use std::fs::File;
 use std::io::{self, BufRead, BufReader, BufWriter, Write};
+use std::sync::atomic::{AtomicU64, Ordering};
 
-const COPY_WINDOW: usize = 25;
-const COPY_WINDOW_STALE_THRESHOLD: usize = 5; // if 5 newer logs have been matched expect no more matches
+const COPY_WINDOW: usize = 200;
+const COPY_WINDOW_STALE_THRESHOLD: usize = 20; // if 10 newer logs have been matched expect no more matches
 // for this one
-const COPY_CONFIDENCE_THRESHOLD: usize = 64; // how many bytes worth of matching of loads AND stores we should see 
+const COPY_CONFIDENCE_THRESHOLD: u64 = 128; // how many bytes worth of matching of loads AND stores we should see 
 // TODO: [yb] make confidence threshold dependent on
 // transfer size
-const COPY_CONFIDENCE_WINDOW: usize = 50; // in the next COPY_CONFIDENCE_WINDOW accesses
+// TODO: [yb] this is too large, optimize, by perhaps keeping track of all copy begins in a vec and loop through whole
+// file once after that
+const COPY_CONFIDENCE_WINDOW: usize = 200000; // in the next COPY_CONFIDENCE_WINDOW accesses
+
+static NEXT_KERNEL_REC_ID: AtomicU64 = AtomicU64::new(0);
 
 // need ongoing copy operations.
 // when a new memory access matches a beginning address of a read/write in the current window ->
@@ -25,6 +31,7 @@ const COPY_CONFIDENCE_WINDOW: usize = 50; // in the next COPY_CONFIDENCE_WINDOW 
 //
 
 struct KernelRecord {
+    rec_id: u64,
     command: String,
     cpu: u32,
     size: u64,
@@ -33,6 +40,8 @@ struct KernelRecord {
     user_address: u64,
     stale: usize,
 }
+
+type AddrMap<T> = HashMap<u64, Vec<T>>;
 
 static KERNEL_LOG_PATTERN: Lazy<Regex> = Lazy::new(|| {
     Regex::new(r#"N=([^,]+),([rw]),(\d+),(\d+),(0x[0-9a-fA-F]+),(0x[0-9a-fA-F]+),(0x[0-9a-fA-F]+),(0x[0-9a-fA-F]+)"#).expect("failed to compile regex")
@@ -53,7 +62,10 @@ impl fmt::Debug for KernelRecord {
     }
 }
 
+#[derive(Clone)]
 struct MemCpy {
+    rec_id: u64,
+    insn_count: u64,
     from: u64,
     to: u64,
     size: u64,
@@ -68,9 +80,9 @@ fn parse_hex_address(hex_str: &str) -> Option<u64> {
 
 fn parse_kernel_line(line: &str) -> Option<KernelRecord> {
     // Regular expression to capture the CSV-like part of the log line
-
     if let Some(caps) = KERNEL_LOG_PATTERN.captures(line) {
         Some(KernelRecord {
+            rec_id: NEXT_KERNEL_REC_ID.fetch_add(1, Ordering::Relaxed),
             command: caps[1].to_string(),
             cpu: caps[3].parse().ok()?,
             size: caps[4].parse().ok()?,
@@ -104,126 +116,25 @@ fn mem_copy_match(mem_access: &log_parser::LogRecord, copy: &MemCpy) -> bool {
         || (copy.current_to == mem_access.address && mem_access.store == 1)
 }
 
-fn is_part_of_copy(
-    mem_access: &log_parser::LogRecord,
-    ongoing_copies: &Vec<MemCpy>,
-) -> Option<usize> {
-    for (i, copy) in ongoing_copies.iter().enumerate() {
-        if mem_copy_match(mem_access, copy) {
-            return Some(i);
-        }
-    }
-    None
-}
-
 fn copy_done(copy: &MemCpy) -> bool {
     // TODO: [yb] handle multi page copies
     copy.current_to >= copy.to + copy.size
 }
 
 fn update_copy(
-    ongoing_copies: &mut Vec<MemCpy>,
+    copies: &mut Vec<MemCpy>,
     copy_idx: usize,
     mem_access: &log_parser::LogRecord,
-) {
+) -> bool {
     // mem_access.size is in shifts (0 = 1 byte, 1 = 2 bytes,...)
     let access_size_bytes = 1 << mem_access.size;
-    let ongoing_copy = &mut ongoing_copies[copy_idx];
+    let copy = &mut copies[copy_idx];
     if mem_access.store == 1 {
-        ongoing_copy.current_to += access_size_bytes;
+        copy.current_to += access_size_bytes;
     } else {
-        ongoing_copy.current_from += access_size_bytes;
+        copy.current_from += access_size_bytes;
     }
-    if copy_done(&ongoing_copy) {
-        ongoing_copies.remove(copy_idx);
-    }
-}
-
-fn new_ongoing_copy(copy: &KernelRecord, mem_access: &log_parser::LogRecord) -> Option<MemCpy> {
-    match copy.operation {
-        'r' => Some(MemCpy {
-            from: copy.kernel_address,
-            to: copy.user_address,
-            size: copy.size,
-            current_from: copy.kernel_address + (1 << mem_access.size),
-            current_to: copy.user_address,
-        }),
-        'w' => Some(MemCpy {
-            from: copy.user_address,
-            to: copy.kernel_address,
-            size: copy.size,
-            current_from: copy.user_address + (1 << mem_access.size),
-            current_to: copy.kernel_address,
-        }),
-        _ => {
-            eprintln!("Invalid operation in kernel record!");
-            None
-        }
-    }
-}
-
-fn copy_start_confidence(
-    copy: &KernelRecord,
-    mem_access: &log_parser::LogRecord,
-    mem_accesses: &mut LookaheadIterator<log_parser::LogParser>,
-) -> usize {
-    let confidence_window = mem_accesses.peek_n(COPY_CONFIDENCE_WINDOW);
-    let copy = new_ongoing_copy(copy, mem_access).expect("failed to parse");
-    let mut tmp_copy = vec![copy];
-    eprintln!("checking start!");
-
-    let mut load_bytes: usize = 0;
-    let mut store_bytes: usize = 0;
-    for access in confidence_window {
-        if let Ok(access) = access {
-            if let Some(copy_idx) = is_part_of_copy(&access, &tmp_copy) {
-                update_copy(&mut tmp_copy, copy_idx, &access);
-                if tmp_copy.is_empty() {
-                    // all copies found in confidence window
-                    return COPY_CONFIDENCE_THRESHOLD + 1;
-                }
-                if access.store == 1 {
-                    store_bytes += 1 << access.size as usize;
-                } else {
-                    load_bytes += 1 << access.size as usize;
-                }
-            }
-        }
-    }
-    return std::cmp::min(load_bytes, store_bytes);
-}
-
-fn is_copy_start(
-    mem_access: &log_parser::LogRecord,
-    copy_window: &Vec<KernelRecord>,
-    mem_accesses: &mut LookaheadIterator<log_parser::LogParser>,
-) -> Option<usize> {
-    for (i, copy) in copy_window.iter().enumerate() {
-        let is_start = match copy.operation {
-            'r' => {
-                // kernel to user copy
-                mem_access.store == 0
-                    && copy.kernel_address == mem_access.address
-                    && copy_start_confidence(&copy, mem_access, mem_accesses)
-                        > COPY_CONFIDENCE_THRESHOLD
-            }
-            'w' => {
-                //user to kernel copy
-                mem_access.store == 0
-                    && copy.user_address == mem_access.address
-                    && copy_start_confidence(&copy, mem_access, mem_accesses)
-                        > COPY_CONFIDENCE_THRESHOLD
-            }
-            _ => {
-                eprintln!("Invalid operation in kernel record!");
-                false
-            }
-        };
-        if is_start {
-            return Some(i);
-        }
-    }
-    None
+    copy_done(&copy)
 }
 
 fn next_kernel_line(lines: &mut impl Iterator<Item = io::Result<String>>) -> Option<KernelRecord> {
@@ -240,22 +151,23 @@ fn next_kernel_line(lines: &mut impl Iterator<Item = io::Result<String>>) -> Opt
 
 fn push_ongoing_copy(
     ongoing_copies: &mut Vec<MemCpy>,
-    copy: &KernelRecord,
-    mem_access: &log_parser::LogRecord,
-    output: &mut BufWriter<File>,
+    potential_copies: &mut Vec<MemCpy>,
+    idx: usize,
 ) {
-    if let Some(copy) = new_ongoing_copy(copy, mem_access) {
-        writeln!(
-            output,
-            "{}",
-            RowcloneRecord {
-                insn_count: mem_access.insn_count,
-                from: copy.from,
-                to: copy.to,
-            }
-        );
-        ongoing_copies.push(copy);
-    }
+    let copy = potential_copies.remove(idx);
+    ongoing_copies.push(copy);
+}
+
+fn print_rowclone(copy: &MemCpy, output: &mut BufWriter<File>) {
+    writeln!(
+        output,
+        "{}",
+        RowcloneRecord {
+            insn_count: copy.insn_count,
+            from: copy.from,
+            to: copy.to,
+        }
+    );
 }
 
 fn print_regular_access(mem_access: &log_parser::LogRecord, output: &mut BufWriter<File>) {
@@ -270,16 +182,19 @@ fn print_regular_access(mem_access: &log_parser::LogRecord, output: &mut BufWrit
     );
 }
 
-fn update_stale(copy_window: &mut Vec<KernelRecord>) {
+fn update_stale(rec_id: u64, copy_window: &mut Vec<KernelRecord>) {
     for copy in copy_window {
-        copy.stale += 1;
+        if copy.rec_id > rec_id {
+            copy.stale += 1;
+        }
     }
 }
 fn remove_stale_copies(
+    rec_id: u64,
     copy_window: &mut Vec<KernelRecord>,
     copy_logs: &mut impl Iterator<Item = io::Result<String>>,
 ) {
-    update_stale(copy_window);
+    update_stale(rec_id, copy_window);
     copy_window.retain(|copy| copy.stale <= COPY_WINDOW_STALE_THRESHOLD);
 
     while copy_window.len() < COPY_WINDOW {
@@ -291,6 +206,119 @@ fn remove_stale_copies(
     }
 }
 
+fn part_of_ongoing_copy(
+    mem_access: &log_parser::LogRecord,
+    ongoing_copies: &mut Vec<MemCpy>,
+) -> bool {
+    for (idx, copy) in ongoing_copies.iter().enumerate() {
+        if mem_copy_match(mem_access, copy) {
+            let done = update_copy(ongoing_copies, idx, &mem_access);
+            if done {
+                ongoing_copies.remove(idx);
+            }
+            return true;
+        }
+    }
+    false
+}
+
+fn copy_matched(potential_copies: &Vec<MemCpy>, idx: usize) -> bool {
+    let copy = &potential_copies[idx];
+    (copy.current_to - copy.to) > COPY_CONFIDENCE_THRESHOLD
+        && (copy.current_from - copy.from) > COPY_CONFIDENCE_THRESHOLD
+}
+fn part_of_potential_copy(
+    mem_access: &log_parser::LogRecord,
+    potential_copies: &mut Vec<MemCpy>,
+    ongoing_copies: &mut Vec<MemCpy>,
+    rowclones: &mut usize,
+    copy_window: &mut Vec<KernelRecord>,
+    copy_logs: &mut impl Iterator<Item = io::Result<String>>,
+    output: &mut BufWriter<File>,
+) -> bool {
+    let mut potential_copy = false;
+    let mut matches: Vec<usize> = vec![];
+    for (idx, copy) in potential_copies.iter().enumerate() {
+        if mem_copy_match(mem_access, copy) {
+            potential_copy = true;
+            matches.push(idx);
+        }
+    }
+    for idx in matches.iter().rev() {
+        let done = update_copy(potential_copies, *idx, &mem_access);
+        if done {
+            print_rowclone(&potential_copies[*idx], output);
+            potential_copies.remove(*idx);
+        } else if copy_matched(potential_copies, *idx) {
+            eprintln!("new rowclone");
+            *rowclones += 1;
+            let rec_id = potential_copies[*idx].rec_id;
+            copy_window.retain(|i| i.rec_id != rec_id);
+            remove_stale_copies(rec_id, copy_window, copy_logs);
+            print_rowclone(&potential_copies[*idx], output);
+            push_ongoing_copy(ongoing_copies, potential_copies, *idx);
+        }
+    }
+    potential_copy
+}
+
+fn check_potential_copy_start(
+    mem_access: &log_parser::LogRecord,
+    copy_window: &Vec<KernelRecord>,
+    potential_copies: &mut Vec<MemCpy>,
+) -> bool {
+    let mut potential_copy = false;
+
+    for copy in copy_window {
+        let is_start = match copy.operation {
+            'r' => {
+                // kernel to user copy
+                mem_access.store == 0 && copy.kernel_address == mem_access.address
+            }
+            'w' => {
+                //user to kernel copy
+                mem_access.store == 0 && copy.user_address == mem_access.address
+            }
+            _ => {
+                eprintln!("Invalid operation in kernel record!");
+                false
+            }
+        };
+        if is_start {
+            let mut existing_potential_copy = false;
+            for pot_copy in potential_copies.iter_mut() {
+                if pot_copy.rec_id == copy.rec_id {
+                    if pot_copy.current_to == pot_copy.to {
+                        pot_copy.insn_count = mem_access.insn_count;
+                        potential_copy = true;
+                    }
+                    existing_potential_copy = true;
+                    break;
+                }
+            }
+            if !existing_potential_copy {
+                let to = if copy.operation == 'w' {
+                    copy.kernel_address
+                } else {
+                    copy.user_address
+                };
+                eprintln!("new potential copy");
+                potential_copies.push(MemCpy {
+                    rec_id: copy.rec_id,
+                    insn_count: mem_access.insn_count,
+                    from: mem_access.address,
+                    to,
+                    size: copy.size,
+                    current_from: mem_access.address + 1 << mem_access.size,
+                    current_to: to,
+                });
+                potential_copy = true;
+            }
+        }
+    }
+    potential_copy
+}
+
 fn match_copy_to_mem_accesses(
     mem_parser: log_parser::LogParser,
     mut copy_logs: impl Iterator<Item = io::Result<String>>,
@@ -298,26 +326,34 @@ fn match_copy_to_mem_accesses(
     output: &mut BufWriter<File>,
 ) {
     let mut ongoing_copies: Vec<MemCpy> = vec![];
+    let mut potential_copies: Vec<MemCpy> = vec![];
     let mut mem_accesses = LookaheadIterator::new(mem_parser);
     let mut rowclones = 0;
 
     while let Some(Ok(mem_access)) = mem_accesses.next() {
-        if let Some(copy_idx) = is_part_of_copy(&mem_access, &ongoing_copies) {
-            update_copy(&mut ongoing_copies, copy_idx, &mem_access);
-        } else if let Some(i) = is_copy_start(&mem_access, &copy_window, &mut mem_accesses) {
-            rowclones += 1;
-            push_ongoing_copy(&mut ongoing_copies, &copy_window[i], &mem_access, output);
-            copy_window.remove(i);
-            if let Some(line) = next_kernel_line(&mut copy_logs) {
-                copy_window.push(line);
-            }
-            remove_stale_copies(copy_window, &mut copy_logs);
-        } else {
-            print_regular_access(&mem_access, output);
+        // TODO: [yb] potentially run accesses through cache here immediately (avoiding
+        // intermediate file)
+        if part_of_ongoing_copy(&mem_access, &mut ongoing_copies) {
+            continue;
+        } else if part_of_potential_copy(
+            &mem_access,
+            &mut potential_copies,
+            &mut ongoing_copies,
+            &mut rowclones,
+            copy_window,
+            &mut copy_logs,
+            output,
+        ) {
+            continue;
+        } else if check_potential_copy_start(&mem_access, &copy_window, &mut potential_copies) {
+            continue;
         }
+
+        print_regular_access(&mem_access, output);
     }
 
     eprintln!("Rowclones matched: {}", rowclones);
+    eprintln!("Potential copies: {}", potential_copies.len());
     eprintln!("Unfinished copies: {}", ongoing_copies.len());
 }
 
