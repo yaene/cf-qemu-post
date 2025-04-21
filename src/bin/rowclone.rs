@@ -1,6 +1,6 @@
 use cf_qemu_post::log_parser;
 use cf_qemu_post::lookahead_iter::LookaheadIterator;
-use cf_qemu_post::memory_access::{MemRecord, RowcloneRecord};
+use cf_qemu_post::memory_access::{MemRecord, MemoryAccess, RowcloneRecord};
 use once_cell::sync::Lazy;
 use regex::Regex;
 use std::collections::HashMap;
@@ -292,6 +292,7 @@ fn check_potential_copy_start(
                         pot_copy.insn_count = mem_access.insn_count;
                         potential_copy = true;
                     }
+                    // TODO: [yb] print previous potential copy
                     existing_potential_copy = true;
                     break;
                 }
@@ -320,17 +321,21 @@ fn check_potential_copy_start(
 }
 
 fn match_copy_to_mem_accesses(
-    mem_parser: log_parser::LogParser,
+    mem_reader: BufReader<File>,
     mut copy_logs: impl Iterator<Item = io::Result<String>>,
     copy_window: &mut Vec<KernelRecord>,
     output: &mut BufWriter<File>,
 ) {
     let mut ongoing_copies: Vec<MemCpy> = vec![];
     let mut potential_copies: Vec<MemCpy> = vec![];
-    let mut mem_accesses = LookaheadIterator::new(mem_parser);
+    let mut mem_accesses = LookaheadIterator::new(
+        mem_reader
+            .lines()
+            .filter_map(|line| line.ok()?.parse::<log_parser::LogRecord>().ok()),
+    );
     let mut rowclones = 0;
 
-    while let Some(Ok(mem_access)) = mem_accesses.next() {
+    while let Some(mem_access) = mem_accesses.next() {
         // TODO: [yb] potentially run accesses through cache here immediately (avoiding
         // intermediate file)
         if part_of_ongoing_copy(&mem_access, &mut ongoing_copies) {
@@ -358,7 +363,7 @@ fn match_copy_to_mem_accesses(
 }
 
 pub fn add_rowclone_info(
-    parser: log_parser::LogParser,
+    mem_reader: BufReader<File>,
     kernel_logfile: &str,
     out_file: &str,
 ) -> io::Result<()> {
@@ -375,7 +380,7 @@ pub fn add_rowclone_info(
         })
         .collect();
 
-    match_copy_to_mem_accesses(parser, lines, &mut copy_window, &mut writer);
+    match_copy_to_mem_accesses(mem_reader, lines, &mut copy_window, &mut writer);
 
     eprintln!("Unmatched Rowclones: {}", copy_window.len());
 
@@ -384,9 +389,10 @@ pub fn add_rowclone_info(
 }
 
 fn main() {
-    let parser = log_parser::LogParser::new("logs/firefox/merged.log").unwrap();
+    let reader =
+        BufReader::new(File::open("logs/firefox/merged.log").expect("Could not open file"));
     if add_rowclone_info(
-        parser,
+        reader,
         "logs/firefox/kernel.log",
         "logs/firefox/rowclone.log",
     )

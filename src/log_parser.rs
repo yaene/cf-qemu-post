@@ -4,6 +4,7 @@ use std::fs::File;
 use std::io::SeekFrom;
 use std::io::{self, BufReader, Read, Seek};
 use std::mem;
+use std::str::FromStr;
 
 #[repr(C)]
 pub struct LogRecord {
@@ -28,6 +29,36 @@ impl LogRecord {
                 Self::SIZE,
             );
         }
+    }
+}
+
+impl fmt::Display for LogRecord {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            f,
+            "{},{},{},{},0x{:016x}",
+            self.insn_count, self.cpu, self.store, self.size, self.address
+        )
+    }
+}
+pub enum ParseError {
+    InvalidFormat(String),
+}
+impl FromStr for LogRecord {
+    type Err = Box<dyn std::error::Error>;
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        let parts: Vec<&str> = s.trim().split(',').collect();
+        if parts.len() != 5 {
+            return Err("Record must have 5 fields".into());
+        }
+
+        Ok(LogRecord {
+            insn_count: parts[0].parse::<u64>()?,
+            cpu: parts[1].parse()?,
+            store: parts[2].parse()?,
+            size: parts[3].parse()?,
+            address: u64::from_str_radix(parts[4].trim_start_matches("0x"), 16)?,
+        })
     }
 }
 impl fmt::Debug for LogRecord {

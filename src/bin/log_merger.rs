@@ -32,7 +32,6 @@ fn main() {
     let output_file = File::create("logs/firefox/merged.log").expect("cant open output file");
 
     let mut writer = BufWriter::new(output_file);
-    let mut output_buf = [0u8; log_parser::LogRecord::SIZE];
     let mut prev_insn_count = 0;
 
     let mut heap: BinaryHeap<Reverse<(log_parser::LogRecord, usize)>> = BinaryHeap::new();
@@ -44,10 +43,7 @@ fn main() {
             eprintln!("Warning: instruction count out of order!");
         }
         prev_insn_count = record.insn_count;
-        record.serialize(&mut output_buf);
-        writer
-            .write_all(&output_buf)
-            .expect("Failed to write to output file");
+        writeln!(writer, "{}", record);
         push_next_record(&mut heap, &mut parsers[i], i);
     }
 }
