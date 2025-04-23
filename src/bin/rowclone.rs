@@ -184,7 +184,7 @@ fn print_regular_access(mem_access: &log_parser::LogRecord, output: &mut BufWrit
 
 fn update_stale(rec_id: u64, copy_window: &mut Vec<KernelRecord>) {
     for copy in copy_window {
-        if copy.rec_id > rec_id {
+        if copy.rec_id < rec_id {
             copy.stale += 1;
         }
     }
@@ -247,6 +247,11 @@ fn part_of_potential_copy(
     for idx in matches.iter().rev() {
         let done = update_copy(potential_copies, *idx, &mem_access);
         if done {
+            eprintln!("new rowclone");
+            *rowclones += 1;
+            let rec_id = potential_copies[*idx].rec_id;
+            copy_window.retain(|i| i.rec_id != rec_id);
+            remove_stale_copies(rec_id, copy_window, copy_logs);
             print_rowclone(&potential_copies[*idx], output);
             potential_copies.remove(*idx);
         } else if copy_matched(potential_copies, *idx) {
