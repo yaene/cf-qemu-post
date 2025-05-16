@@ -175,6 +175,7 @@ fn print_regular_access(mem_access: &log_parser::LogRecord, output: &mut BufWrit
         output,
         "{}",
         MemRecord {
+            cpu: mem_access.cpu.into(),
             insn_count: mem_access.insn_count,
             address: mem_access.address,
             store: mem_access.store == 1,

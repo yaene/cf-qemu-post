@@ -1,11 +1,12 @@
 use std::{
     cmp::Reverse,
     collections::BinaryHeap,
-    fs::File,
+    fs::{self, File},
     io::{BufWriter, Write},
 };
 
 use cf_qemu_post::log_parser;
+use clap::Parser;
 
 const CPUS: usize = 8;
 
@@ -19,19 +20,22 @@ fn push_next_record(
     }
 }
 
-fn main() {
-    let mut parsers: Vec<log_parser::LogParser> = Vec::new();
-    for c in 0..CPUS {
-        let filename = format!("logs/firefox/log.txt.{c}");
-        parsers.push(
-            log_parser::LogParser::new(&filename)
-                .expect(format!("Failed to open log file {filename}").as_str()),
-        );
-    }
+#[derive(Parser, Debug)]
+#[command(about)]
+struct Args {
+    // Whether the input logs are in binary format
+    #[arg(short, long)]
+    log_dir: String,
+}
+fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let args = Args::parse();
+    let mut parsers: Vec<log_parser::LogParser> = fs::read_dir(args.log_dir)?
+        .filter_map(Result::ok)
+        .filter_map(|entry| entry.path().into_os_string().into_string().ok())
+        .filter_map(|file| log_parser::LogParser::new(&file).ok())
+        .collect();
 
-    let output_file = File::create("logs/firefox/merged.log").expect("cant open output file");
-
-    let mut writer = BufWriter::new(output_file);
+    let mut writer = BufWriter::new(std::io::stdout());
     let mut prev_insn_count = 0;
 
     let mut heap: BinaryHeap<Reverse<(log_parser::LogRecord, usize)>> = BinaryHeap::new();
@@ -46,4 +50,5 @@ fn main() {
         writeln!(writer, "{}", record);
         push_next_record(&mut heap, &mut parsers[i], i);
     }
+    Ok(())
 }

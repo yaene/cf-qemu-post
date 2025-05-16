@@ -1,10 +1,13 @@
 use std::{
-    fs::File,
     io::{BufRead, BufReader, BufWriter, Write},
     str::FromStr,
 };
 
-use cf_qemu_post::memory_access::{MemoryAccess, ParseError, RowcloneRecord};
+use cf_qemu_post::{
+    log_parser::{self},
+    memory_access::{MemRecord, MemoryAccess},
+};
+use clap::Parser;
 
 #[derive(Debug)]
 pub struct Cache {
@@ -75,33 +78,67 @@ impl Cache {
     }
 }
 
-fn parse_rowclone_record(line: &str) -> Result<MemoryAccess, ParseError> {
+fn parse_rowclone_record(line: &str) -> Result<MemoryAccess, Box<dyn std::error::Error>> {
     MemoryAccess::from_str(line)
 }
 
-fn main() {
-    let reader = BufReader::new(
-        File::open("logs/firefox/rowclone.log").expect("cant open rowclone info file"),
-    );
-    let mut writer = BufWriter::new(
-        File::create("logs/firefox/trace.log").expect("cant open trace output file"),
-    );
+fn parse_binary_record(line: &str) -> Result<MemoryAccess, Box<dyn std::error::Error>> {
+    let access = log_parser::LogRecord::from_str(line)?;
+    Ok(MemoryAccess::Regular(MemRecord {
+        cpu: access.cpu.into(),
+        address: access.address,
+        insn_count: access.insn_count,
+        store: access.store == 1,
+    }))
+}
 
-    // TODO: [yb] per CPU cache..
-    // Create an L2 cache: 256KB, 64B blocks, 8-way associative.
-    let mut l2 = Cache::new(1024, 64, 8);
+#[derive(Parser, Debug)]
+#[command(about)]
+struct Args {
+    // Whether the input logs are in binary format
+    #[arg(short, long, default_value_t = false)]
+    binary_in: bool,
+
+    // the number of CPUs
+    #[arg(short, long, default_value_t = 8)]
+    cpus: usize,
+}
+
+fn ramulator_mem_format(rec: MemRecord) -> String {
+    if rec.store {
+        format!("{}, -1, 0x{:016x}", rec.insn_count, rec.address)
+    } else {
+        format!("{}, 0x{:016x}", rec.insn_count, rec.address)
+    }
+}
+
+fn main() {
+    let args = Args::parse();
+    let reader = BufReader::new(std::io::stdin());
+    let mut writer = BufWriter::new(std::io::stdout());
+    let input_parser = if args.binary_in {
+        parse_binary_record
+    } else {
+        parse_rowclone_record
+    };
+
+    // Create an L2 cache: 512KB, 64B blocks, 8-way associative.
+    // no need for an L1 since we model inclusive cache and only care about
+    // memory accesses
+    let mut caches: Vec<Cache> = (0..args.cpus)
+        .map(|_| Cache::new(512 * 1024, 64, 8))
+        .collect();
 
     let mut lines = reader.lines();
     while let Some(Ok(line)) = lines.next() {
-        if let Ok(rec) = parse_rowclone_record(&line) {
+        if let Ok(rec) = input_parser(&line) {
             if let MemoryAccess::Regular(mem) = rec {
-                if !l2.access(mem.address) {
-                    writeln!(writer, "{}", mem);
+                if !caches[mem.cpu].access(mem.address) {
+                    writeln!(writer, "{}", ramulator_mem_format(mem));
                 }
             } else {
                 // TODO: [yb] handle rowclone in cache
             }
         }
     }
-    // TODO: [yb] make logfile an argument
 }

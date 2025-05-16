@@ -13,6 +13,7 @@ pub struct MemRecord {
     pub insn_count: u64,
     pub address: u64,
     pub store: bool,
+    pub cpu: usize,
 }
 
 #[derive(Debug, Clone)]
@@ -25,9 +26,17 @@ pub struct RowcloneRecord {
 impl fmt::Display for MemRecord {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         if self.store {
-            write!(f, "{},-1,0x{:016x}", self.insn_count, self.address)
+            write!(
+                f,
+                "{},0,1,{},0x{:016x}",
+                self.insn_count, self.cpu, self.address
+            )
         } else {
-            write!(f, "{},0x{:016x}", self.insn_count, self.address)
+            write!(
+                f,
+                "{},0,0,{},0x{:016x}",
+                self.insn_count, self.cpu, self.address
+            )
         }
     }
 }
@@ -36,7 +45,7 @@ impl fmt::Display for RowcloneRecord {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(
             f,
-            "{},0x{:016x},0x{:016x}",
+            "{},1,0,0x{:016x},0x{:016x}",
             self.insn_count, self.from, self.to
         )
     }
@@ -55,38 +64,27 @@ fn parse_hex_addr(addr: &str) -> u64 {
     u64::from_str_radix(addr.trim_start_matches("0x"), 16).expect("Failed to parse hex address")
 }
 
-pub enum ParseError {
-    InvalidFormat(String),
-}
-
 impl FromStr for MemoryAccess {
-    type Err = ParseError;
+    type Err = Box<dyn std::error::Error>;
     fn from_str(s: &str) -> Result<Self, Self::Err> {
         let parts: Vec<&str> = s.trim().split(',').collect();
-        let insn_count = parts[0].parse::<u64>().expect("fail");
-        if parts.len() == 4 {
-            // rowclone
+        if parts.len() != 5 {
+            return Err("Record must have at least five fields".into());
+        }
+        let insn_count = parts[0].parse::<u64>()?;
+        if parts[1] == "1" {
             Ok(MemoryAccess::Rowclone(RowcloneRecord {
                 insn_count,
                 from: parse_hex_addr(parts[1]),
                 to: parse_hex_addr(parts[2]),
             }))
-        } else if parts.len() == 3 {
+        } else {
             Ok(MemoryAccess::Regular(MemRecord {
                 insn_count,
                 address: parse_hex_addr(parts[2]),
-                store: true,
+                store: parts[2] == "1",
+                cpu: parts[3].parse::<usize>()?,
             }))
-        } else if parts.len() == 2 {
-            Ok(MemoryAccess::Regular(MemRecord {
-                insn_count,
-                address: parse_hex_addr(parts[1]),
-                store: false,
-            }))
-        } else {
-            return Err(ParseError::InvalidFormat(
-                "Record must have at least two fields".into(),
-            ));
         }
     }
 }

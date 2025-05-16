@@ -41,9 +41,7 @@ impl fmt::Display for LogRecord {
         )
     }
 }
-pub enum ParseError {
-    InvalidFormat(String),
-}
+
 impl FromStr for LogRecord {
     type Err = Box<dyn std::error::Error>;
     fn from_str(s: &str) -> Result<Self, Self::Err> {
