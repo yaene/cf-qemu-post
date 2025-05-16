@@ -104,11 +104,12 @@ struct Args {
     cpus: usize,
 }
 
-fn ramulator_mem_format(rec: MemRecord) -> String {
+fn ramulator_mem_format(rec: &MemRecord, prev_insn_count: &u64) -> String {
+    let bubble = rec.insn_count - prev_insn_count;
     if rec.store {
-        format!("{}, -1, 0x{:016x}", rec.insn_count, rec.address)
+        format!("{}, -1, 0x{:016x}", bubble, rec.address)
     } else {
-        format!("{}, 0x{:016x}", rec.insn_count, rec.address)
+        format!("{}, 0x{:016x}", bubble, rec.address)
     }
 }
 
@@ -130,11 +131,19 @@ fn main() {
         .collect();
 
     let mut lines = reader.lines();
+    let mut first = true;
+    let mut prev_insn_count = 0;
+
     while let Some(Ok(line)) = lines.next() {
         if let Ok(rec) = input_parser(&line) {
             if let MemoryAccess::Regular(mem) = rec {
+                if first {
+                    prev_insn_count = mem.insn_count;
+                    first = false;
+                }
                 if !caches[mem.cpu].access(mem.address) {
-                    writeln!(writer, "{}", ramulator_mem_format(mem));
+                    writeln!(writer, "{}", ramulator_mem_format(&mem, &prev_insn_count));
+                    prev_insn_count = mem.insn_count;
                 }
             } else {
                 // TODO: [yb] handle rowclone in cache
