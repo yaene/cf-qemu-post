@@ -27,7 +27,7 @@ impl CacheSet {
     pub fn new(associativity: usize) -> Self {
         CacheSet {
             lines: vec![None; associativity],
-            lru_order: (0..associativity).collect(),
+            lru_order: vec![],
         }
     }
 
