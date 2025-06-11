@@ -107,9 +107,9 @@ struct Args {
 fn ramulator_mem_format(rec: &MemRecord, prev_insn_count: &u64) -> String {
     let bubble = rec.insn_count - prev_insn_count;
     if rec.store {
-        format!("{}, -1, 0x{:016x}", bubble, rec.address)
+        format!("{} -1 0x{:016x}", bubble, rec.address)
     } else {
-        format!("{}, 0x{:016x}", bubble, rec.address)
+        format!("{} 0x{:016x}", bubble, rec.address)
     }
 }
 
@@ -136,17 +136,32 @@ fn main() {
 
     while let Some(Ok(line)) = lines.next() {
         if let Ok(rec) = input_parser(&line) {
-            if let MemoryAccess::Regular(mem) = rec {
-                if first {
+            match rec {
+                MemoryAccess::Regular(mem) => {
+                    if first {
+                        prev_insn_count = mem.insn_count;
+                        first = false;
+                    }
+                    if !caches[mem.cpu].access(mem.address) {
+                        writeln!(writer, "{}", ramulator_mem_format(&mem, &prev_insn_count));
+                    }
                     prev_insn_count = mem.insn_count;
-                    first = false;
                 }
-                if !caches[mem.cpu].access(mem.address) {
-                    writeln!(writer, "{}", ramulator_mem_format(&mem, &prev_insn_count));
-                    prev_insn_count = mem.insn_count;
+                MemoryAccess::Rowclone(rc) => {
+                    if first {
+                        prev_insn_count = rc.insn_count;
+                        first = false;
+                    }
+                    // TODO: invalidate cache lines
+                    writeln!(
+                        writer,
+                        "{} 0x{:016x} 0x{:016x}",
+                        rc.insn_count - prev_insn_count,
+                        rc.from,
+                        rc.to,
+                    );
+                    prev_insn_count = rc.insn_count;
                 }
-            } else {
-                // TODO: [yb] handle rowclone in cache
             }
         }
     }
