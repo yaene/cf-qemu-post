@@ -54,6 +54,15 @@ impl CacheSet {
             false
         }
     }
+    // Invalidate a specific block tag in this set (if present).
+    pub fn invalidate(&mut self, tag: u64) {
+        if let Some(pos) = self.lines.iter().position(|&line| line == Some(tag)) {
+            // Remove the line
+            self.lines[pos] = None;
+            // Remove from LRU tracking
+            self.lru_order.retain(|&i| i != pos);
+        }
+    }
 }
 
 impl Cache {
@@ -75,6 +84,20 @@ impl Cache {
         let set_index = (block_addr as usize) % self.sets.len();
         // The tag can simply be the block_addr
         self.sets[set_index].access(block_addr)
+    }
+
+    pub fn invalidate_page(&mut self, address: u64) {
+        const PAGE_SIZE: u64 = 4096;
+        assert!(address % PAGE_SIZE == 0);
+
+        // Compute block indices in page
+        let start_block = address / (self.block_size as u64);
+        let end_block = (address + PAGE_SIZE - 1) / (self.block_size as u64);
+
+        for block_addr in start_block..=end_block {
+            let set_index = (block_addr as usize) % self.sets.len();
+            self.sets[set_index].invalidate(block_addr);
+        }
     }
 }
 
@@ -152,7 +175,9 @@ fn main() {
                         prev_insn_count = rc.insn_count;
                         first = false;
                     }
-                    // TODO: invalidate cache lines
+                    for cache in &mut caches {
+                        cache.invalidate_page(rc.to);
+                    }
                     writeln!(
                         writer,
                         "{} 0x{:016x} 0x{:016x}",
