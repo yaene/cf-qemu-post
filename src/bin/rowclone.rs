@@ -137,11 +137,28 @@ fn update_copy(
     copy_done(&copy)
 }
 
-fn next_kernel_line(lines: &mut impl Iterator<Item = io::Result<String>>) -> Option<KernelRecord> {
-    // TODO: [yb] filter non-rowclonable (not same subarray)
-    if let Some(Ok(line)) = lines.next() {
+#[derive(Debug)]
+struct Stats {
+    total: usize,
+    not4kb: usize,
+    notaligned: usize,
+}
+
+fn next_kernel_line(
+    lines: &mut impl Iterator<Item = io::Result<String>>,
+    stats: &mut Stats,
+) -> Option<KernelRecord> {
+    const PAGE_SIZE: u64 = 4096;
+    while let Some(Ok(line)) = lines.next() {
         if let Some(record) = parse_kernel_line(&line) {
-            return Some(record);
+            stats.total += 1;
+            if record.size != PAGE_SIZE {
+                stats.not4kb += 1;
+            } else if (record.user_address & (PAGE_SIZE - 1)) != 0 {
+                stats.notaligned += 1;
+            } else {
+                return Some(record);
+            }
         } else {
             eprintln!("not parsed?");
         }
@@ -194,12 +211,13 @@ fn remove_stale_copies(
     rec_id: u64,
     copy_window: &mut Vec<KernelRecord>,
     copy_logs: &mut impl Iterator<Item = io::Result<String>>,
+    stats: &mut Stats,
 ) {
     update_stale(rec_id, copy_window);
     copy_window.retain(|copy| copy.stale <= COPY_WINDOW_STALE_THRESHOLD);
 
     while copy_window.len() < COPY_WINDOW {
-        if let Some(line) = next_kernel_line(copy_logs) {
+        if let Some(line) = next_kernel_line(copy_logs, stats) {
             copy_window.push(line);
         } else {
             return;
@@ -236,6 +254,7 @@ fn part_of_potential_copy(
     copy_window: &mut Vec<KernelRecord>,
     copy_logs: &mut impl Iterator<Item = io::Result<String>>,
     output: &mut BufWriter<File>,
+    stats: &mut Stats,
 ) -> bool {
     let mut potential_copy = false;
     let mut matches: Vec<usize> = vec![];
@@ -252,7 +271,7 @@ fn part_of_potential_copy(
             *rowclones += 1;
             let rec_id = potential_copies[*idx].rec_id;
             copy_window.retain(|i| i.rec_id != rec_id);
-            remove_stale_copies(rec_id, copy_window, copy_logs);
+            remove_stale_copies(rec_id, copy_window, copy_logs, stats);
             print_rowclone(&potential_copies[*idx], output);
             potential_copies.remove(*idx);
         } else if copy_matched(potential_copies, *idx) {
@@ -260,7 +279,7 @@ fn part_of_potential_copy(
             *rowclones += 1;
             let rec_id = potential_copies[*idx].rec_id;
             copy_window.retain(|i| i.rec_id != rec_id);
-            remove_stale_copies(rec_id, copy_window, copy_logs);
+            remove_stale_copies(rec_id, copy_window, copy_logs, stats);
             print_rowclone(&potential_copies[*idx], output);
             push_ongoing_copy(ongoing_copies, potential_copies, *idx);
         }
@@ -340,6 +359,11 @@ fn match_copy_to_mem_accesses(
             .filter_map(|line| line.ok()?.parse::<log_parser::LogRecord>().ok()),
     );
     let mut rowclones = 0;
+    let mut stats = Stats {
+        total: 0,
+        not4kb: 0,
+        notaligned: 0,
+    };
 
     while let Some(mem_access) = mem_accesses.next() {
         // TODO: [yb] potentially run accesses through cache here immediately (avoiding
@@ -354,6 +378,7 @@ fn match_copy_to_mem_accesses(
             copy_window,
             &mut copy_logs,
             output,
+            &mut stats,
         ) {
             continue;
         } else if check_potential_copy_start(&mem_access, &copy_window, &mut potential_copies) {
@@ -366,6 +391,7 @@ fn match_copy_to_mem_accesses(
     eprintln!("Rowclones matched: {}", rowclones);
     eprintln!("Potential copies: {}", potential_copies.len());
     eprintln!("Unfinished copies: {}", ongoing_copies.len());
+    eprintln!("{:#?}", stats);
 }
 
 pub fn add_rowclone_info(
