@@ -1,6 +1,7 @@
 use cf_qemu_post::log_parser;
 use cf_qemu_post::lookahead_iter::LookaheadIterator;
 use cf_qemu_post::memory_access::{MemRecord, MemoryAccess, RowcloneRecord};
+use clap::{Parser, command};
 use once_cell::sync::Lazy;
 use regex::Regex;
 use std::collections::HashMap;
@@ -134,6 +135,7 @@ fn update_copy(
     } else {
         copy.current_from += access_size_bytes;
     }
+    copy.insn_count = mem_access.insn_count;
     copy_done(&copy)
 }
 
@@ -142,21 +144,33 @@ struct Stats {
     total: usize,
     not4kb: usize,
     notaligned: usize,
+    not_same_subarray: usize,
+    rowclone: usize,
+}
+
+fn filter_non_rowclone(record: KernelRecord, stats: &mut Stats) -> Option<KernelRecord> {
+    const PAGE_SIZE: u64 = 4096;
+    stats.total += 1;
+    if record.size != PAGE_SIZE {
+        stats.not4kb += 1;
+    } else if (record.user_address & (PAGE_SIZE - 1)) != 0 {
+        stats.notaligned += 1;
+    } else if !address_in_same_subarray(record.user_address, record.kernel_address) {
+        stats.not_same_subarray += 1;
+    } else {
+        stats.rowclone += 1;
+        return Some(record);
+    }
+    None
 }
 
 fn next_kernel_line(
     lines: &mut impl Iterator<Item = io::Result<String>>,
     stats: &mut Stats,
 ) -> Option<KernelRecord> {
-    const PAGE_SIZE: u64 = 4096;
     while let Some(Ok(line)) = lines.next() {
         if let Some(record) = parse_kernel_line(&line) {
-            stats.total += 1;
-            if record.size != PAGE_SIZE {
-                stats.not4kb += 1;
-            } else if (record.user_address & (PAGE_SIZE - 1)) != 0 {
-                stats.notaligned += 1;
-            } else {
+            if let Some(record) = filter_non_rowclone(record, stats) {
                 return Some(record);
             }
         } else {
@@ -175,7 +189,7 @@ fn push_ongoing_copy(
     ongoing_copies.push(copy);
 }
 
-fn print_rowclone(copy: &MemCpy, output: &mut BufWriter<File>) {
+fn print_rowclone(copy: &MemCpy, output: &mut BufWriter<std::io::Stdout>) {
     writeln!(
         output,
         "{}",
@@ -187,7 +201,10 @@ fn print_rowclone(copy: &MemCpy, output: &mut BufWriter<File>) {
     );
 }
 
-fn print_regular_access(mem_access: &log_parser::LogRecord, output: &mut BufWriter<File>) {
+fn print_regular_access(
+    mem_access: &log_parser::LogRecord,
+    output: &mut BufWriter<std::io::Stdout>,
+) {
     writeln!(
         output,
         "{}",
@@ -253,7 +270,7 @@ fn part_of_potential_copy(
     rowclones: &mut usize,
     copy_window: &mut Vec<KernelRecord>,
     copy_logs: &mut impl Iterator<Item = io::Result<String>>,
-    output: &mut BufWriter<File>,
+    output: &mut BufWriter<std::io::Stdout>,
     stats: &mut Stats,
 ) -> bool {
     let mut potential_copy = false;
@@ -346,10 +363,11 @@ fn check_potential_copy_start(
 }
 
 fn match_copy_to_mem_accesses(
-    mem_reader: BufReader<File>,
+    mem_reader: BufReader<std::io::Stdin>,
     mut copy_logs: impl Iterator<Item = io::Result<String>>,
     copy_window: &mut Vec<KernelRecord>,
-    output: &mut BufWriter<File>,
+    output: &mut BufWriter<std::io::Stdout>,
+    stats: &mut Stats,
 ) {
     let mut ongoing_copies: Vec<MemCpy> = vec![];
     let mut potential_copies: Vec<MemCpy> = vec![];
@@ -359,12 +377,6 @@ fn match_copy_to_mem_accesses(
             .filter_map(|line| line.ok()?.parse::<log_parser::LogRecord>().ok()),
     );
     let mut rowclones = 0;
-    let mut stats = Stats {
-        total: 0,
-        not4kb: 0,
-        notaligned: 0,
-    };
-
     while let Some(mem_access) = mem_accesses.next() {
         // TODO: [yb] potentially run accesses through cache here immediately (avoiding
         // intermediate file)
@@ -378,7 +390,7 @@ fn match_copy_to_mem_accesses(
             copy_window,
             &mut copy_logs,
             output,
-            &mut stats,
+            stats,
         ) {
             continue;
         } else if check_potential_copy_start(&mem_access, &copy_window, &mut potential_copies) {
@@ -391,45 +403,53 @@ fn match_copy_to_mem_accesses(
     eprintln!("Rowclones matched: {}", rowclones);
     eprintln!("Potential copies: {}", potential_copies.len());
     eprintln!("Unfinished copies: {}", ongoing_copies.len());
-    eprintln!("{:#?}", stats);
 }
 
 pub fn add_rowclone_info(
-    mem_reader: BufReader<File>,
+    mem_reader: BufReader<std::io::Stdin>,
     kernel_logfile: &str,
-    out_file: &str,
 ) -> io::Result<()> {
+    let mut stats = Stats {
+        total: 0,
+        not4kb: 0,
+        notaligned: 0,
+        not_same_subarray: 0,
+        rowclone: 0,
+    };
+
     let kernel_log = File::open(kernel_logfile)?;
-    let mut writer = BufWriter::new(File::create(out_file).expect("failed to open output"));
+    let mut writer = BufWriter::new(std::io::stdout());
     let reader = BufReader::new(kernel_log);
     let mut lines = reader.lines();
     let mut copy_window = lines
         .by_ref()
-        .take(COPY_WINDOW)
         .filter_map(|l| {
             let line = l.expect("Failed to read copy line");
             parse_kernel_line(&line)
         })
+        .filter_map(|record| filter_non_rowclone(record, &mut stats))
+        .take(COPY_WINDOW)
         .collect();
 
-    match_copy_to_mem_accesses(mem_reader, lines, &mut copy_window, &mut writer);
+    match_copy_to_mem_accesses(mem_reader, lines, &mut copy_window, &mut writer, &mut stats);
 
     eprintln!("Unmatched Rowclones: {}", copy_window.len());
-
+    eprintln!("{:#?}", stats);
     let _ = writer.flush();
     Ok(())
 }
+#[derive(Parser, Debug)]
+#[command(about)]
+struct Args {
+    // Whether the input logs are in binary format
+    #[arg(short, long)]
+    kernel_logfile: String,
+}
 
 fn main() {
-    let reader =
-        BufReader::new(File::open("logs/firefox/merged.log").expect("Could not open file"));
-    if add_rowclone_info(
-        reader,
-        "logs/firefox/kernel.log",
-        "logs/firefox/rowclone.log",
-    )
-    .is_ok()
-    {
+    let args = Args::parse();
+    let reader = BufReader::new(std::io::stdin());
+    if add_rowclone_info(reader, &args.kernel_logfile).is_ok() {
         eprintln!("Finished adding rowclone info");
     } else {
         eprintln!("Error adding rowclone info");

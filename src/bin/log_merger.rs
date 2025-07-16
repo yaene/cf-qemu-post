@@ -31,7 +31,15 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let args = Args::parse();
     let mut parsers: Vec<log_parser::LogParser> = fs::read_dir(args.log_dir)?
         .filter_map(Result::ok)
-        .filter_map(|entry| entry.path().into_os_string().into_string().ok())
+        .map(|entry| entry.path())
+        .filter(|path| {
+            if let Some(file_name) = path.file_name().and_then(|name| name.to_str()) {
+                file_name.starts_with("log.txt")
+            } else {
+                false
+            }
+        })
+        .filter_map(|path| path.into_os_string().into_string().ok())
         .filter_map(|file| log_parser::LogParser::new(&file).ok())
         .collect();
 

@@ -75,13 +75,13 @@ impl FromStr for MemoryAccess {
         if parts[1] == "1" {
             Ok(MemoryAccess::Rowclone(RowcloneRecord {
                 insn_count,
-                from: parse_hex_addr(parts[1]),
-                to: parse_hex_addr(parts[2]),
+                from: parse_hex_addr(parts[3]),
+                to: parse_hex_addr(parts[4]),
             }))
         } else {
             Ok(MemoryAccess::Regular(MemRecord {
                 insn_count,
-                address: parse_hex_addr(parts[2]),
+                address: parse_hex_addr(parts[4]),
                 store: parts[2] == "1",
                 cpu: parts[3].parse::<usize>()?,
             }))
