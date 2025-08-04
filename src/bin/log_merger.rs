@@ -44,17 +44,17 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .collect();
 
     let mut writer = BufWriter::new(std::io::stdout());
-    let mut prev_insn_count = 0;
+    let mut prev_clock = 0;
 
     let mut heap: BinaryHeap<Reverse<(log_parser::LogRecord, usize)>> = BinaryHeap::new();
     for (i, parser) in parsers.iter_mut().enumerate() {
         push_next_record(&mut heap, parser, i);
     }
     while let Some(Reverse((record, i))) = heap.pop() {
-        if prev_insn_count > record.insn_count {
+        if prev_clock > record.logical_clock {
             eprintln!("Warning: instruction count out of order!");
         }
-        prev_insn_count = record.insn_count;
+        prev_clock = record.logical_clock;
         writeln!(writer, "{}", record);
         push_next_record(&mut heap, &mut parsers[i], i);
     }

@@ -66,6 +66,7 @@ impl fmt::Debug for KernelRecord {
 #[derive(Clone)]
 struct MemCpy {
     rec_id: u64,
+    cpu: usize,
     insn_count: u64,
     from: u64,
     to: u64,
@@ -136,6 +137,7 @@ fn update_copy(
         copy.current_from += access_size_bytes;
     }
     copy.insn_count = mem_access.insn_count;
+    copy.cpu = mem_access.cpu as usize;
     copy_done(&copy)
 }
 
@@ -194,6 +196,7 @@ fn print_rowclone(copy: &MemCpy, output: &mut BufWriter<std::io::Stdout>) {
         output,
         "{}",
         RowcloneRecord {
+            cpu: copy.cpu,
             insn_count: copy.insn_count,
             from: copy.from,
             to: copy.to,
@@ -351,6 +354,7 @@ fn check_potential_copy_start(
                     insn_count: mem_access.insn_count,
                     from: mem_access.address,
                     to,
+                    cpu: mem_access.cpu as usize,
                     size: copy.size,
                     current_from: mem_access.address + 1 << mem_access.size,
                     current_to: to,

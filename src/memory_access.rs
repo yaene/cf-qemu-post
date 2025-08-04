@@ -21,6 +21,7 @@ pub struct RowcloneRecord {
     pub insn_count: u64,
     pub from: u64,
     pub to: u64,
+    pub cpu: usize,
 }
 
 impl fmt::Display for MemRecord {
@@ -45,8 +46,8 @@ impl fmt::Display for RowcloneRecord {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(
             f,
-            "{},1,0,0x{:016x},0x{:016x}",
-            self.insn_count, self.from, self.to
+            "{},1,0,{},0x{:016x},0x{:016x}",
+            self.insn_count, self.cpu, self.from, self.to
         )
     }
 }
@@ -68,15 +69,16 @@ impl FromStr for MemoryAccess {
     type Err = Box<dyn std::error::Error>;
     fn from_str(s: &str) -> Result<Self, Self::Err> {
         let parts: Vec<&str> = s.trim().split(',').collect();
-        if parts.len() != 5 {
+        if parts.len() < 5 {
             return Err("Record must have at least five fields".into());
         }
         let insn_count = parts[0].parse::<u64>()?;
         if parts[1] == "1" {
             Ok(MemoryAccess::Rowclone(RowcloneRecord {
                 insn_count,
-                from: parse_hex_addr(parts[3]),
-                to: parse_hex_addr(parts[4]),
+                cpu: parts[3].parse::<usize>()?,
+                from: parse_hex_addr(parts[4]),
+                to: parse_hex_addr(parts[5]),
             }))
         } else {
             Ok(MemoryAccess::Regular(MemRecord {

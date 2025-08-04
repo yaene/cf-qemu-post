@@ -31,7 +31,6 @@ impl CacheSet {
         }
     }
 
-    // TODO: [yb] handle rowclone (invalidation) in cache
     /// Returns true if tag hit; false if miss.
     pub fn access(&mut self, tag: u64) -> bool {
         if let Some(pos) = self.lines.iter().position(|&line| line == Some(tag)) {
@@ -125,6 +124,9 @@ struct Args {
     // the number of CPUs
     #[arg(short, long, default_value_t = 8)]
     cpus: usize,
+
+    #[arg(short, long)]
+    log_dir: String,
 }
 
 fn ramulator_mem_format(rec: &MemRecord, prev_insn_count: &u64) -> String {
@@ -139,7 +141,14 @@ fn ramulator_mem_format(rec: &MemRecord, prev_insn_count: &u64) -> String {
 fn main() {
     let args = Args::parse();
     let reader = BufReader::new(std::io::stdin());
-    let mut writer = BufWriter::new(std::io::stdout());
+    let mut writers: Vec<BufWriter<std::fs::File>> = (0..args.cpus)
+        .map(|cpu_id| {
+            let filename = format!("{}/cpu_{}.trace", args.log_dir, cpu_id);
+            let file = std::fs::File::create(&filename)
+                .unwrap_or_else(|_| panic!("Failed to create output file: {}", filename));
+            BufWriter::new(file)
+        })
+        .collect();
     let input_parser = if args.binary_in {
         parse_binary_record
     } else {
@@ -154,38 +163,44 @@ fn main() {
         .collect();
 
     let mut lines = reader.lines();
-    let mut first = true;
-    let mut prev_insn_count = 0;
+    let mut first = vec![true; args.cpus];
+    let mut prev_insn_count = vec![0; args.cpus];
 
     while let Some(Ok(line)) = lines.next() {
         if let Ok(rec) = input_parser(&line) {
             match rec {
                 MemoryAccess::Regular(mem) => {
-                    if first {
-                        prev_insn_count = mem.insn_count;
-                        first = false;
+                    let cpu = mem.cpu;
+                    if first[cpu] {
+                        prev_insn_count[cpu] = mem.insn_count;
+                        first[cpu] = false;
                     }
-                    if !caches[mem.cpu].access(mem.address) {
-                        writeln!(writer, "{}", ramulator_mem_format(&mem, &prev_insn_count));
+                    if !caches[cpu].access(mem.address) {
+                        writeln!(
+                            writers[cpu],
+                            "{}",
+                            ramulator_mem_format(&mem, &prev_insn_count[cpu])
+                        );
+                        prev_insn_count[cpu] = mem.insn_count;
                     }
-                    prev_insn_count = mem.insn_count;
                 }
                 MemoryAccess::Rowclone(rc) => {
-                    if first {
-                        prev_insn_count = rc.insn_count;
-                        first = false;
+                    let cpu = rc.cpu;
+                    if first[cpu] {
+                        prev_insn_count[cpu] = rc.insn_count;
+                        first[cpu] = false;
                     }
                     for cache in &mut caches {
                         cache.invalidate_page(rc.to);
                     }
                     writeln!(
-                        writer,
+                        writers[cpu],
                         "{} 0x{:016x} 0x{:016x}",
-                        rc.insn_count - prev_insn_count,
+                        rc.insn_count - prev_insn_count[cpu],
                         rc.from,
                         rc.to,
                     );
-                    prev_insn_count = rc.insn_count;
+                    prev_insn_count[cpu] = rc.insn_count;
                 }
             }
         }

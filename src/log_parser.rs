@@ -8,6 +8,7 @@ use std::str::FromStr;
 
 #[repr(C)]
 pub struct LogRecord {
+    pub logical_clock: u64,
     pub insn_count: u64,
     pub cpu: u8,
     pub store: u8,
@@ -36,8 +37,8 @@ impl fmt::Display for LogRecord {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(
             f,
-            "{},{},{},{},0x{:016x}",
-            self.insn_count, self.cpu, self.store, self.size, self.address
+            "{},{},{},{},{},0x{:016x}",
+            self.logical_clock, self.insn_count, self.cpu, self.store, self.size, self.address
         )
     }
 }
@@ -46,16 +47,16 @@ impl FromStr for LogRecord {
     type Err = Box<dyn std::error::Error>;
     fn from_str(s: &str) -> Result<Self, Self::Err> {
         let parts: Vec<&str> = s.trim().split(',').collect();
-        if parts.len() != 5 {
-            return Err("Record must have 5 fields".into());
+        if parts.len() != 6 {
+            return Err("Record must have at least 5 fields".into());
         }
-
         Ok(LogRecord {
-            insn_count: parts[0].parse::<u64>()?,
-            cpu: parts[1].parse()?,
-            store: parts[2].parse()?,
-            size: parts[3].parse()?,
-            address: u64::from_str_radix(parts[4].trim_start_matches("0x"), 16)?,
+            logical_clock: parts[0].parse::<u64>()?,
+            insn_count: parts[1].parse::<u64>()?,
+            cpu: parts[2].parse()?,
+            store: parts[3].parse()?,
+            size: parts[4].parse()?,
+            address: u64::from_str_radix(parts[5].trim_start_matches("0x"), 16)?,
         })
     }
 }
@@ -63,15 +64,15 @@ impl fmt::Debug for LogRecord {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         write!(
             f,
-            "LogRecord {{insn_count: {}, cpu: {}, store: {}, size: {}, address: 0x{:016x} }}",
-            self.insn_count, self.cpu, self.store, self.size, self.address
+            "LogRecord {{logical_clock: {}, insn_count: {}, cpu: {}, store: {}, size: {}, address: 0x{:016x} }}",
+            self.logical_clock, self.insn_count, self.cpu, self.store, self.size, self.address
         )
     }
 }
 
 impl PartialEq for LogRecord {
     fn eq(&self, other: &Self) -> bool {
-        self.insn_count == other.insn_count
+        self.logical_clock == other.logical_clock
     }
 }
 
@@ -79,12 +80,12 @@ impl Eq for LogRecord {}
 
 impl PartialOrd for LogRecord {
     fn partial_cmp(&self, other: &Self) -> Option<cmp::Ordering> {
-        Some(self.insn_count.cmp(&other.insn_count))
+        Some(self.logical_clock.cmp(&other.logical_clock))
     }
 }
 impl Ord for LogRecord {
     fn cmp(&self, other: &Self) -> cmp::Ordering {
-        self.insn_count.cmp(&other.insn_count)
+        self.logical_clock.cmp(&other.logical_clock)
     }
 }
 
